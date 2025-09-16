@@ -8,10 +8,13 @@ No environment variables required - all credentials passed as parameters.
 import ssl
 import email
 import logging
+import smtplib
 from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime, timezone
 from email.header import decode_header, make_header
-from email.utils import parsedate_to_datetime
+from email.utils import parsedate_to_datetime, formataddr
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 import html2text
 from imapclient import IMAPClient
 from imapclient.exceptions import IMAPClientError
@@ -27,21 +30,24 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 
 mcp = FastMCP(
-    name="IMAP Email Server",
+    name="Email Server (IMAP/SMTP)",
     instructions="""
-    IMAP Email Server for MCP
+    Email Server for MCP - IMAP and SMTP Operations
 
-    This server provides comprehensive IMAP email operations without requiring
+    This server provides comprehensive email operations without requiring
     environment variables. All credentials are passed dynamically to each tool.
 
     Key Features:
-    - Test IMAP connections
-    - List and search emails
-    - Read email content
-    - Manage emails (move, delete, flag)
+    - Send emails via SMTP
+    - Read and manage emails via IMAP
+    - Reply and forward emails
+    - Batch operations
+    - Email thread management
     - Folder operations
+    - SMTP configuration helper
 
-    All tools require IMAP server credentials as parameters.
+    All tools require credentials as parameters - no environment variables needed.
+    Supports Gmail, Outlook, Yahoo, and any IMAP/SMTP compatible servers.
     """
 )
 
@@ -228,6 +234,88 @@ def parse_email_message(raw_message: bytes) -> Dict[str, Any]:
         "attachments": attachments,
         "has_attachments": len(attachments) > 0
     }
+
+# ============================================================================
+# SMTP Configuration and Helpers
+# ============================================================================
+
+# Common SMTP server configurations
+SMTP_CONFIGS = {
+    "gmail.com": {"server": "smtp.gmail.com", "port": 587, "use_tls": True},
+    "outlook.com": {"server": "smtp-mail.outlook.com", "port": 587, "use_tls": True},
+    "hotmail.com": {"server": "smtp-mail.outlook.com", "port": 587, "use_tls": True},
+    "live.com": {"server": "smtp-mail.outlook.com", "port": 587, "use_tls": True},
+    "yahoo.com": {"server": "smtp.mail.yahoo.com", "port": 587, "use_tls": True},
+    "icloud.com": {"server": "smtp.mail.me.com", "port": 587, "use_tls": True},
+    "aol.com": {"server": "smtp.aol.com", "port": 587, "use_tls": True},
+}
+
+def guess_smtp_config(email_address: str) -> Dict[str, Any]:
+    """
+    Guess SMTP configuration based on email domain.
+
+    Args:
+        email_address: Email address to analyze
+
+    Returns:
+        SMTP configuration dict or None
+    """
+    try:
+        domain = email_address.split('@')[1].lower()
+        return SMTP_CONFIGS.get(domain, None)
+    except:
+        return None
+
+def create_smtp_connection(
+    server: str,
+    username: str,
+    password: str,
+    port: int = 587,
+    use_tls: bool = True,
+    timeout: int = 30
+) -> smtplib.SMTP:
+    """
+    Create and authenticate SMTP connection.
+
+    Args:
+        server: SMTP server hostname
+        username: Email username
+        password: Email password
+        port: SMTP port (default 587 for TLS)
+        use_tls: Use STARTTLS
+        timeout: Connection timeout in seconds
+
+    Returns:
+        Authenticated SMTP instance
+
+    Raises:
+        ConnectionError: Failed to connect
+        AuthenticationError: Failed to authenticate
+    """
+    try:
+        if port == 465:
+            # SMTP_SSL for port 465
+            smtp = smtplib.SMTP_SSL(server, port, timeout=timeout)
+        else:
+            # Regular SMTP with optional STARTTLS
+            smtp = smtplib.SMTP(server, port, timeout=timeout)
+            if use_tls:
+                smtp.starttls()
+
+        logger.info(f"Connected to SMTP server {server}:{port}")
+
+        try:
+            smtp.login(username, password)
+            logger.info(f"Authenticated to SMTP as {username}")
+            return smtp
+        except smtplib.SMTPAuthenticationError as e:
+            raise AuthenticationError(f"SMTP authentication failed: {str(e)}")
+
+    except Exception as e:
+        if "authentication" in str(e).lower() or "login" in str(e).lower():
+            raise AuthenticationError(f"SMTP authentication failed: {str(e)}")
+        else:
+            raise ConnectionError(f"SMTP connection failed: {str(e)}")
 
 # ============================================================================
 # Connection and Authentication Tools
@@ -1078,6 +1166,696 @@ async def get_email_count(
         }
 
 # ============================================================================
+# SMTP Email Sending Tools
+# ============================================================================
+
+@mcp.tool()
+async def get_smtp_config(
+    email_address: str
+) -> Dict[str, Any]:
+    """
+    Get suggested SMTP configuration for an email address.
+
+    Args:
+        email_address: Email address to analyze
+
+    Returns:
+        SMTP configuration suggestion
+    """
+    try:
+        config = guess_smtp_config(email_address)
+
+        if config:
+            return {
+                "success": True,
+                "email": email_address,
+                "domain": email_address.split('@')[1],
+                "smtp_server": config["server"],
+                "smtp_port": config["port"],
+                "use_tls": config["use_tls"],
+                "note": "Use app-specific password if 2FA is enabled"
+            }
+        else:
+            domain = email_address.split('@')[1]
+            return {
+                "success": True,
+                "email": email_address,
+                "domain": domain,
+                "smtp_server": f"smtp.{domain}",
+                "smtp_port": 587,
+                "use_tls": True,
+                "note": "Generic configuration - adjust server if needed"
+            }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+@mcp.tool()
+async def send_email(
+    smtp_server: str,
+    smtp_username: str,
+    smtp_password: str,
+    to_email: str,
+    subject: str,
+    body: str,
+    from_email: Optional[str] = None,
+    cc: Optional[str] = None,
+    bcc: Optional[str] = None,
+    html_body: Optional[str] = None,
+    reply_to: Optional[str] = None,
+    smtp_port: int = 587,
+    use_tls: bool = True
+) -> Dict[str, Any]:
+    """
+    Send an email via SMTP.
+
+    Args:
+        smtp_server: SMTP server hostname
+        smtp_username: SMTP username (usually email address)
+        smtp_password: SMTP password
+        to_email: Recipient email address(es) - comma separated
+        subject: Email subject
+        body: Plain text body
+        from_email: From address (default: smtp_username)
+        cc: CC recipients - comma separated
+        bcc: BCC recipients - comma separated
+        html_body: HTML body (optional)
+        reply_to: Reply-to address
+        smtp_port: SMTP port (587 for TLS, 465 for SSL)
+        use_tls: Use TLS/STARTTLS
+
+    Returns:
+        Send status and message ID
+    """
+    try:
+        # Use smtp_username as from_email if not specified
+        if not from_email:
+            from_email = smtp_username
+
+        # Create message
+        if html_body:
+            msg = MIMEMultipart('alternative')
+            msg.attach(MIMEText(body, 'plain'))
+            msg.attach(MIMEText(html_body, 'html'))
+        else:
+            msg = MIMEText(body, 'plain')
+
+        # Set headers
+        msg['From'] = from_email
+        msg['To'] = to_email
+        msg['Subject'] = subject
+        msg['Date'] = email.utils.formatdate(localtime=True)
+        msg['Message-ID'] = email.utils.make_msgid()
+
+        if cc:
+            msg['Cc'] = cc
+
+        if reply_to:
+            msg['Reply-To'] = reply_to
+
+        # Combine all recipients
+        recipients = [addr.strip() for addr in to_email.split(',')]
+        if cc:
+            recipients.extend([addr.strip() for addr in cc.split(',')])
+        if bcc:
+            recipients.extend([addr.strip() for addr in bcc.split(',')])
+
+        # Send email
+        smtp = create_smtp_connection(
+            smtp_server,
+            smtp_username,
+            smtp_password,
+            smtp_port,
+            use_tls
+        )
+
+        try:
+            smtp.send_message(msg, from_email, recipients)
+            message_id = msg['Message-ID']
+            smtp.quit()
+
+            return {
+                "success": True,
+                "message": "Email sent successfully",
+                "message_id": message_id,
+                "from": from_email,
+                "to": to_email,
+                "subject": subject
+            }
+
+        except Exception as e:
+            smtp.quit()
+            raise e
+
+    except AuthenticationError as e:
+        return {
+            "success": False,
+            "error": "authentication_failed",
+            "message": str(e)
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+@mcp.tool()
+async def reply_to_email(
+    server: str,
+    username: str,
+    password: str,
+    email_id: int,
+    smtp_server: str,
+    smtp_username: str,
+    smtp_password: str,
+    reply_body: str,
+    folder: str = "INBOX",
+    quote_original: bool = True,
+    reply_all: bool = False,
+    smtp_port: int = 587,
+    use_tls: bool = True,
+    port: int = 993,
+    use_ssl: bool = True
+) -> Dict[str, Any]:
+    """
+    Reply to an email maintaining thread.
+
+    Args:
+        server: IMAP server hostname
+        username: IMAP username
+        password: IMAP password
+        email_id: Email message ID to reply to
+        smtp_server: SMTP server hostname
+        smtp_username: SMTP username
+        smtp_password: SMTP password
+        reply_body: Reply message body
+        folder: Folder containing the email
+        quote_original: Include quoted original message
+        reply_all: Reply to all recipients
+        smtp_port: SMTP port
+        use_tls: Use TLS for SMTP
+        port: IMAP port
+        use_ssl: Use SSL for IMAP
+
+    Returns:
+        Reply status
+    """
+    try:
+        # Fetch original email
+        client = create_imap_connection(server, username, password, port, use_ssl)
+        client.select_folder(folder, readonly=True)
+
+        fetch_data = client.fetch([email_id], ['RFC822', 'FLAGS'])
+        if email_id not in fetch_data:
+            client.logout()
+            return {
+                "success": False,
+                "error": f"Email {email_id} not found"
+            }
+
+        raw_message = fetch_data[email_id][b'RFC822']
+        original = email.message_from_bytes(raw_message)
+
+        # Extract original details
+        original_from = original.get('From', '')
+        original_to = original.get('To', '')
+        original_cc = original.get('Cc', '')
+        original_subject = original.get('Subject', '')
+        original_message_id = original.get('Message-ID', '')
+        original_references = original.get('References', '')
+
+        client.logout()
+
+        # Parse original body for quoting
+        original_body = ""
+        if quote_original:
+            parsed = parse_email_message(raw_message)
+            original_body = parsed.get('text_body', '')
+
+        # Prepare reply
+        if not original_subject.lower().startswith('re:'):
+            reply_subject = f"Re: {original_subject}"
+        else:
+            reply_subject = original_subject
+
+        # Determine recipients
+        reply_to_addr = original.get('Reply-To', original_from)
+
+        if reply_all:
+            # Reply to all: sender + all recipients except us
+            all_addrs = f"{reply_to_addr},{original_to}"
+            if original_cc:
+                all_addrs += f",{original_cc}"
+
+            # Filter out our own address
+            addrs = [addr.strip() for addr in all_addrs.split(',')]
+            addrs = [addr for addr in addrs if smtp_username not in addr]
+            to_addresses = ','.join(addrs)
+        else:
+            to_addresses = reply_to_addr
+
+        # Build reply body
+        if quote_original and original_body:
+            quoted = '\n'.join(f"> {line}" for line in original_body.split('\n'))
+            full_body = f"{reply_body}\n\n--- Original Message ---\n{quoted}"
+        else:
+            full_body = reply_body
+
+        # Create reply message
+        msg = MIMEText(full_body, 'plain')
+        msg['From'] = smtp_username
+        msg['To'] = to_addresses
+        msg['Subject'] = reply_subject
+        msg['In-Reply-To'] = original_message_id
+
+        # Maintain thread
+        if original_references:
+            msg['References'] = f"{original_references} {original_message_id}"
+        else:
+            msg['References'] = original_message_id
+
+        msg['Date'] = email.utils.formatdate(localtime=True)
+        msg['Message-ID'] = email.utils.make_msgid()
+
+        # Send reply
+        smtp = create_smtp_connection(
+            smtp_server,
+            smtp_username,
+            smtp_password,
+            smtp_port,
+            use_tls
+        )
+
+        try:
+            smtp.send_message(msg)
+            message_id = msg['Message-ID']
+            smtp.quit()
+
+            return {
+                "success": True,
+                "message": "Reply sent successfully",
+                "message_id": message_id,
+                "in_reply_to": original_message_id,
+                "to": to_addresses,
+                "subject": reply_subject
+            }
+
+        except Exception as e:
+            smtp.quit()
+            raise e
+
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+@mcp.tool()
+async def forward_email(
+    server: str,
+    username: str,
+    password: str,
+    email_id: int,
+    smtp_server: str,
+    smtp_username: str,
+    smtp_password: str,
+    to_email: str,
+    forward_message: str = "",
+    folder: str = "INBOX",
+    smtp_port: int = 587,
+    use_tls: bool = True,
+    port: int = 993,
+    use_ssl: bool = True
+) -> Dict[str, Any]:
+    """
+    Forward an email to another recipient.
+
+    Args:
+        server: IMAP server hostname
+        username: IMAP username
+        password: IMAP password
+        email_id: Email message ID to forward
+        smtp_server: SMTP server hostname
+        smtp_username: SMTP username
+        smtp_password: SMTP password
+        to_email: Forward to email address(es)
+        forward_message: Additional message to include
+        folder: Folder containing the email
+        smtp_port: SMTP port
+        use_tls: Use TLS for SMTP
+        port: IMAP port
+        use_ssl: Use SSL for IMAP
+
+    Returns:
+        Forward status
+    """
+    try:
+        # Fetch original email
+        client = create_imap_connection(server, username, password, port, use_ssl)
+        client.select_folder(folder, readonly=True)
+
+        fetch_data = client.fetch([email_id], ['RFC822'])
+        if email_id not in fetch_data:
+            client.logout()
+            return {
+                "success": False,
+                "error": f"Email {email_id} not found"
+            }
+
+        raw_message = fetch_data[email_id][b'RFC822']
+        original = email.message_from_bytes(raw_message)
+
+        client.logout()
+
+        # Parse original
+        parsed = parse_email_message(raw_message)
+
+        # Create forward subject
+        original_subject = parsed.get('subject', 'No Subject')
+        if not original_subject.lower().startswith('fwd:'):
+            forward_subject = f"Fwd: {original_subject}"
+        else:
+            forward_subject = original_subject
+
+        # Build forward body
+        forward_body = ""
+        if forward_message:
+            forward_body = f"{forward_message}\n\n"
+
+        forward_body += f"""---------- Forwarded message ----------
+From: {parsed.get('from', '')}
+Date: {parsed.get('date', '')}
+Subject: {original_subject}
+To: {parsed.get('to', '')}
+
+{parsed.get('text_body', '')}"""
+
+        # Note about attachments if present
+        if parsed.get('has_attachments'):
+            attachments = parsed.get('attachments', [])
+            forward_body += f"\n\n[Note: Original email had {len(attachments)} attachment(s): "
+            forward_body += ", ".join([att['filename'] for att in attachments])
+            forward_body += "]"
+
+        # Send forward
+        return await send_email(
+            smtp_server=smtp_server,
+            smtp_username=smtp_username,
+            smtp_password=smtp_password,
+            to_email=to_email,
+            subject=forward_subject,
+            body=forward_body,
+            smtp_port=smtp_port,
+            use_tls=use_tls
+        )
+
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+# ============================================================================
+# Enhanced Email Operations
+# ============================================================================
+
+@mcp.tool()
+async def batch_mark_emails(
+    server: str,
+    username: str,
+    password: str,
+    email_ids: List[int],
+    action: str = "read",
+    folder: str = "INBOX",
+    port: int = 993,
+    use_ssl: bool = True
+) -> Dict[str, Any]:
+    """
+    Mark multiple emails at once.
+
+    Args:
+        server: IMAP server hostname
+        username: Email username
+        password: Email password
+        email_ids: List of email message IDs
+        action: Action to perform ('read', 'unread', 'flag', 'unflag')
+        folder: Folder containing the emails
+        port: IMAP port
+        use_ssl: Use SSL/TLS connection
+
+    Returns:
+        Batch operation status
+    """
+    try:
+        client = create_imap_connection(server, username, password, port, use_ssl)
+        client.select_folder(folder, readonly=False)
+
+        # Apply action to all emails
+        if action == "read":
+            client.add_flags(email_ids, [b'\\Seen'])
+            operation = "marked as read"
+        elif action == "unread":
+            client.remove_flags(email_ids, [b'\\Seen'])
+            operation = "marked as unread"
+        elif action == "flag":
+            client.add_flags(email_ids, [b'\\Flagged'])
+            operation = "flagged"
+        elif action == "unflag":
+            client.remove_flags(email_ids, [b'\\Flagged'])
+            operation = "unflagged"
+        else:
+            client.logout()
+            return {
+                "success": False,
+                "error": f"Invalid action: {action}"
+            }
+
+        client.logout()
+
+        return {
+            "success": True,
+            "message": f"{len(email_ids)} emails {operation}",
+            "email_ids": email_ids,
+            "folder": folder,
+            "action": action,
+            "count": len(email_ids)
+        }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+@mcp.tool()
+async def get_email_thread(
+    server: str,
+    username: str,
+    password: str,
+    email_id: int,
+    folder: str = "INBOX",
+    port: int = 993,
+    use_ssl: bool = True
+) -> Dict[str, Any]:
+    """
+    Get all emails in a conversation thread.
+
+    Args:
+        server: IMAP server hostname
+        username: Email username
+        password: Email password
+        email_id: Email message ID to find thread for
+        folder: Folder to search in
+        port: IMAP port
+        use_ssl: Use SSL/TLS connection
+
+    Returns:
+        List of related emails in the thread
+    """
+    try:
+        client = create_imap_connection(server, username, password, port, use_ssl)
+        client.select_folder(folder, readonly=True)
+
+        # Get the original email
+        fetch_data = client.fetch([email_id], ['ENVELOPE', 'RFC822.HEADER'])
+
+        if email_id not in fetch_data:
+            client.logout()
+            return {
+                "success": False,
+                "error": f"Email {email_id} not found"
+            }
+
+        # Parse headers to get thread info
+        envelope = fetch_data[email_id][b'ENVELOPE']
+        headers = email.message_from_bytes(fetch_data[email_id][b'RFC822.HEADER'])
+
+        subject = decode_header_value(envelope.subject.decode() if envelope.subject else "")
+        # Remove Re: and Fwd: prefixes for thread matching
+        clean_subject = subject
+        for prefix in ['Re:', 'RE:', 'Fwd:', 'FWD:', 'Fw:', 'FW:']:
+            clean_subject = clean_subject.replace(prefix, '').strip()
+
+        message_id = headers.get('Message-ID', '')
+        references = headers.get('References', '').split()
+        in_reply_to = headers.get('In-Reply-To', '')
+
+        # Search for related messages
+        thread_emails = []
+
+        # Search by subject (crude but effective)
+        if clean_subject:
+            # Search for emails with similar subject
+            subject_results = client.search(['SUBJECT', clean_subject])
+
+            for msg_id in subject_results:
+                msg_data = client.fetch([msg_id], ['ENVELOPE', 'FLAGS', 'INTERNALDATE'])
+                if msg_id in msg_data:
+                    env = msg_data[msg_id][b'ENVELOPE']
+                    flags = msg_data[msg_id].get(b'FLAGS', [])
+                    date = msg_data[msg_id].get(b'INTERNALDATE')
+
+                    from_str = ""
+                    if env.from_:
+                        addr = env.from_[0]
+                        from_str = f"{addr.name.decode() if addr.name else ''} <{addr.mailbox.decode()}@{addr.host.decode()}>".strip()
+
+                    thread_emails.append({
+                        "id": msg_id,
+                        "subject": decode_header_value(env.subject.decode() if env.subject else ""),
+                        "from": from_str,
+                        "date": date.isoformat() if date else None,
+                        "is_seen": b'\\Seen' in flags,
+                        "is_current": msg_id == email_id
+                    })
+
+        # Sort by date
+        thread_emails.sort(key=lambda x: x['date'] or '')
+
+        client.logout()
+
+        return {
+            "success": True,
+            "thread_count": len(thread_emails),
+            "current_email_id": email_id,
+            "emails": thread_emails,
+            "subject": subject
+        }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+@mcp.tool()
+async def search_by_date_range(
+    server: str,
+    username: str,
+    password: str,
+    start_date: str,
+    end_date: str,
+    folder: str = "INBOX",
+    port: int = 993,
+    use_ssl: bool = True,
+    limit: int = 100
+) -> Dict[str, Any]:
+    """
+    Search emails within a date range.
+
+    Args:
+        server: IMAP server hostname
+        username: Email username
+        password: Email password
+        start_date: Start date (YYYY-MM-DD)
+        end_date: End date (YYYY-MM-DD)
+        folder: Folder to search in
+        port: IMAP port
+        use_ssl: Use SSL/TLS connection
+        limit: Maximum results
+
+    Returns:
+        List of emails in date range
+    """
+    try:
+        client = create_imap_connection(server, username, password, port, use_ssl)
+        client.select_folder(folder, readonly=True)
+
+        # Convert dates to IMAP format (DD-MMM-YYYY)
+        from datetime import datetime
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+
+        start_imap = start_dt.strftime("%d-%b-%Y")
+        end_imap = end_dt.strftime("%d-%b-%Y")
+
+        # Search within date range
+        criteria = ['SINCE', start_imap, 'BEFORE', end_imap]
+        messages = client.search(criteria)
+
+        if not messages:
+            client.logout()
+            return {
+                "success": True,
+                "emails": [],
+                "total": 0,
+                "date_range": f"{start_date} to {end_date}"
+            }
+
+        # Limit results
+        messages = list(messages)
+        messages.reverse()  # Newest first
+        total = len(messages)
+        messages = messages[:limit]
+
+        # Fetch email data
+        email_list = []
+        fetch_data = client.fetch(
+            messages,
+            ['ENVELOPE', 'FLAGS', 'INTERNALDATE', 'UID']
+        )
+
+        for msg_id, data in fetch_data.items():
+            envelope = data[b'ENVELOPE']
+            flags = data.get(b'FLAGS', [])
+            date = data.get(b'INTERNALDATE')
+
+            subject = decode_header_value(envelope.subject.decode() if envelope.subject else "")
+            from_str = ""
+            if envelope.from_:
+                addr = envelope.from_[0]
+                from_str = f"{addr.name.decode() if addr.name else ''} <{addr.mailbox.decode()}@{addr.host.decode()}>".strip()
+
+            email_list.append({
+                "id": msg_id,
+                "subject": subject,
+                "from": from_str,
+                "date": date.isoformat() if date else None,
+                "is_seen": b'\\Seen' in flags,
+                "is_flagged": b'\\Flagged' in flags
+            })
+
+        client.logout()
+
+        return {
+            "success": True,
+            "emails": email_list,
+            "total": total,
+            "returned": len(email_list),
+            "date_range": f"{start_date} to {end_date}",
+            "folder": folder
+        }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+# ============================================================================
 # Main execution for local testing
 # ============================================================================
 
@@ -1086,12 +1864,15 @@ if __name__ == "__main__":
 
     async def test_server():
         """Test the MCP server locally."""
-        print("FastMCP IMAP Server")
+        print("FastMCP Email Server (IMAP/SMTP)")
         print("=" * 50)
         print("Server is ready for MCP connections.")
-        print("\nAvailable tools:")
-        for tool in mcp.list_tools():
-            print(f"  - {tool.name}")
+        print("\nFeatures:")
+        print("  - Send emails via SMTP")
+        print("  - Read and manage emails via IMAP")
+        print("  - Reply and forward emails")
+        print("  - Batch operations")
+        print("  - Email thread management")
         print("\nUse 'fastmcp dev server.py' to run in development mode.")
 
     asyncio.run(test_server())

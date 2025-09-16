@@ -1,23 +1,39 @@
-# FastMCP IMAP Server
+# FastMCP Email Server (IMAP/SMTP)
 
-A Model Context Protocol (MCP) server for IMAP email operations using FastMCP. This server provides comprehensive email management capabilities without requiring environment variables - all credentials are passed dynamically to each tool.
+A comprehensive Model Context Protocol (MCP) server for email operations using FastMCP. This server provides full email functionality including sending (SMTP), receiving (IMAP), and management capabilities - all without requiring environment variables. All credentials are passed dynamically to each tool.
 
-## Features
+## 🎯 Key Features
 
-### Connection & Authentication
-- **check_connection**: Test IMAP server connectivity with provided credentials
-- **list_folders**: Get all available email folders/mailboxes
+- **Send emails via SMTP** with HTML support
+- **Read and manage emails via IMAP**
+- **Reply and forward** maintaining email threads
+- **Batch operations** for efficient management
+- **Thread tracking** for conversations
+- **Dynamic credentials** - no environment variables needed
 
-### Email Reading
+## 📧 Available Tools (17 total)
+
+### SMTP Tools (Email Sending)
+- **get_smtp_config**: Get SMTP server configuration for any email provider
+- **send_email**: Send emails with HTML/plain text, CC/BCC support
+- **reply_to_email**: Reply maintaining thread/conversation
+- **forward_email**: Forward emails to others
+
+### IMAP Tools (Email Reading)
+- **check_connection**: Test IMAP server connectivity
+- **list_folders**: Get all email folders/mailboxes
 - **list_emails**: List emails with pagination and filtering
-- **read_email**: Get full email content including headers, body, and attachment info
+- **read_email**: Get full email content (headers, body, attachments info)
 - **search_emails**: Advanced search with multiple criteria
-- **get_email_count**: Get statistics for a specific folder
+- **search_by_date_range**: Find emails between specific dates
+- **get_email_count**: Get folder statistics
 
 ### Email Management
-- **mark_email**: Mark emails as read/unread or flagged/unflagged
+- **mark_email**: Mark as read/unread or flagged/unflagged
+- **batch_mark_emails**: Mark multiple emails at once
 - **move_email**: Move emails between folders
 - **delete_email**: Delete emails (trash or permanent)
+- **get_email_thread**: Get all emails in a conversation
 
 ### Folder Operations
 - **create_folder**: Create new email folders
@@ -53,7 +69,48 @@ python server.py
 
 ## Tool Examples
 
-### Test Connection
+### SMTP: Send Email
+```python
+await send_email(
+    smtp_server="smtp.gmail.com",
+    smtp_username="user@gmail.com",
+    smtp_password="app_specific_password",
+    to_email="recipient@example.com",
+    subject="Hello from MCP",
+    body="This is a test email",
+    html_body="<h1>Hello</h1><p>This is a <b>test</b> email</p>",
+    smtp_port=587,
+    use_tls=True
+)
+```
+
+### SMTP: Reply to Email
+```python
+await reply_to_email(
+    # IMAP credentials to fetch original
+    server="imap.gmail.com",
+    username="user@gmail.com",
+    password="password",
+    email_id=123,
+    # SMTP credentials to send reply
+    smtp_server="smtp.gmail.com",
+    smtp_username="user@gmail.com",
+    smtp_password="password",
+    reply_body="Thanks for your email!",
+    quote_original=True,
+    reply_all=False
+)
+```
+
+### SMTP: Get Configuration
+```python
+await get_smtp_config(
+    email_address="user@gmail.com"
+)
+# Returns: {server: "smtp.gmail.com", port: 587, use_tls: true}
+```
+
+### IMAP: Test Connection
 ```python
 await check_connection(
     server="imap.gmail.com",
@@ -64,43 +121,50 @@ await check_connection(
 )
 ```
 
-### List Emails
+### IMAP: Search by Date Range
 ```python
-await list_emails(
+await search_by_date_range(
     server="imap.gmail.com",
     username="user@gmail.com",
     password="password",
-    folder="INBOX",
-    limit=20,
-    offset=0
+    start_date="2024-01-01",
+    end_date="2024-01-31",
+    folder="INBOX"
 )
 ```
 
-### Search Emails
+### Batch Operations
 ```python
-await search_emails(
+await batch_mark_emails(
     server="imap.gmail.com",
     username="user@gmail.com",
     password="password",
-    subject="important",
-    from_address="boss@company.com",
-    unread_only=True
+    email_ids=[123, 124, 125, 126],
+    action="read",  # or "unread", "flag", "unflag"
+    folder="INBOX"
 )
 ```
 
-### Read Email
+### Thread Management
 ```python
-await read_email(
+await get_email_thread(
     server="imap.gmail.com",
     username="user@gmail.com",
     password="password",
     email_id=123,
-    folder="INBOX",
-    mark_as_read=True
+    folder="INBOX"
 )
 ```
 
-## Supported IMAP Servers
+## Supported Email Servers
+
+### SMTP Servers
+- **Gmail**: smtp.gmail.com:587 (TLS)
+- **Outlook**: smtp-mail.outlook.com:587 (TLS)
+- **Yahoo**: smtp.mail.yahoo.com:587 (TLS)
+- **iCloud**: smtp.mail.me.com:587 (TLS)
+
+### IMAP Servers
 
 ### Gmail
 - Server: `imap.gmail.com`
